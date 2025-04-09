@@ -32,6 +32,9 @@ class CreateColorspaceLook(TrayPublishCreator):
     colorspace_items = [
         (None, "Not set")
     ]
+
+    default_variants = ["main"]
+
     colorspace_attr_show = False
     config_items = None
     config_data = None
