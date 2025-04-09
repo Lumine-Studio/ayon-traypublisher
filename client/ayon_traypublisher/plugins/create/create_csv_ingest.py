@@ -55,7 +55,7 @@ def _get_row_value_with_validation(
     # get column default value
     column_default = column_data["default"]
 
-    if column_type in ["number", "decimal"] and column_default == 0:
+    if column_type in ["number", "decimal"] and column_default in (0, '0'):
         column_default = None
 
     # check if column value is not empty string
@@ -181,6 +181,8 @@ class ProductItem:
         self.variant = variant
         self.product_type = product_type
         self.repre_items: List[RepreItem] = []
+        self.has_promised_context = False
+        self.parents = None
         self._unique_name = None
         self._pre_product_name = None
 
@@ -249,6 +251,7 @@ configuration in project settings.
     # settings for this creator
     columns_config = {}
     representations_config = {}
+    folder_creation_config = {}
 
     def get_instance_attr_defs(self):
         return [
@@ -388,6 +391,79 @@ configuration in project settings.
 
         return filepath
 
+    def _get_folder_type_from_regex_settings(self, folder_name: str) -> str:
+        """ Get the folder type that matches the regex settings.
+
+        Args:
+            folder_name (str): The folder name.
+
+        Returns:
+            str. The folder type to use.
+        """
+        for folder_setting in self.folder_creation_config["folder_type_regexes"]:
+            if re.match(folder_setting["regex"], folder_name):
+                folder_type = folder_setting["folder_type"]
+                return folder_type
+
+        return self.folder_creation_config["folder_create_type"]
+
+    def _compute_parents_data(self, project_name: str, product_item: ProductItem) -> list:
+        """ Compute parent data when new hierarchy has to be created during the
+            publishing process.
+
+        Args:
+            project_name (str): The project name.
+            product_item (ProductItem): The product item to inspect.
+
+        Returns:
+            list. The parent list if any
+
+        Raise:
+            ValueError: When provided folder_path parent do not exist.
+        """
+        parent_folder_names = product_item.folder_path.lstrip("/").split("/")
+        # Rename name of folder itself
+        parent_folder_names.pop(-1)
+        if not parent_folder_names:
+            return []
+
+        parent_paths = []
+        parent_path = ""
+        for name in parent_folder_names:
+            path = f"{parent_path}/{name}"
+            parent_paths.append(path)
+            parent_path = path
+
+        folders_by_path = {
+            folder["path"]: folder
+            for folder in ayon_api.get_folders(
+                project_name,
+                folder_paths=parent_paths,
+                fields={"folderType", "path"}
+            )
+        }
+        parent_data = []
+        for path in parent_paths:
+            folder_entity = folders_by_path.get(path)
+            name = path.rsplit("/", 1)[-1]
+
+            # Folder exists, retrieve data from existing.
+            if folder_entity:
+                folder_type = folder_entity["folderType"]
+
+            # Define folder type from settings.
+            else:
+                folder_type = self._get_folder_type_from_regex_settings(name)
+
+            item = {
+                "entity_name": name,
+                "folder_type": folder_type,
+            }
+            parent_data.append(item)
+
+        return parent_data
+
+
     def _get_data_from_csv(
         self, csv_dir: str, filename: str
     ) -> Dict[str, ProductItem]:
@@ -458,12 +534,6 @@ configuration in project settings.
             )
         }
         missing_paths: Set[str] = folder_paths - set(folder_ids_by_path.keys())
-        if missing_paths:
-            ending = "" if len(missing_paths) == 1 else "s"
-            joined_paths = "\n".join(sorted(missing_paths))
-            raise CreatorError(
-                f"Folder{ending} not found.\n{joined_paths}"
-            )
 
         task_names: Set[str] = {
             product_item.task_name
@@ -480,8 +550,25 @@ configuration in project settings.
             task_entities_by_folder_id[folder_id].append(task_entity)
 
         missing_tasks: Set[str] = set()
+        if missing_paths and not self.folder_creation_config["enabled"]:
+            error_msg = (
+                "Folder creation is disabled but found missing folder(s): %r" %
+                ",".join(missing_paths)
+            )
+            raise CreatorError(error_msg)
+
         for product_item in product_items_by_name.values():
             folder_path = product_item.folder_path
+
+            if folder_path in missing_paths:
+                product_item.has_promised_context = True
+                product_item.task_type = None
+                product_item.parents = self._compute_parents_data(
+                    project_name,
+                    product_item
+                )
+                continue
+
             task_name = product_item.task_name
             folder_id = folder_ids_by_path[folder_path]
             task_entities = task_entities_by_folder_id[folder_id]
@@ -644,10 +731,25 @@ configuration in project settings.
         # convert ### string in file name to %03d
         # this is for correct frame range validation
         # example: file.###.exr -> file.%03d.exr
+        file_head = basename.split(".")[0]
         if "#" in basename:
             padding = len(basename.split("#")) - 1
-            basename = basename.replace("#" * padding, f"%0{padding}d")
+            seq_padding = f"%0{padding}d"
+            basename = basename.replace("#" * padding, seq_padding)
+            file_head = basename.split(seq_padding)[0]
             is_sequence = True
+        elif "%" in basename:
+            pattern = re.compile(r"%\d+d|%d")
+            padding = pattern.findall(basename)
+            if not padding:
+                raise CreatorError(
+                    f"File sequence padding not found in '{basename}'."
+                )
+            file_head = basename.split("%")[0]
+            is_sequence = True
+        else:
+            # in case it is still image
+            is_sequence = False
 
         # make absolute path to file
         dirname: str = os.path.dirname(repre_item.filepath)
@@ -662,8 +764,14 @@ configuration in project settings.
         frame_end: Union[int, None] = None
         files: Union[str, List[str]] = basename
         if is_sequence:
+            # get only filtered files form dirname
+            files_from_dir = [
+                filename
+                for filename in os.listdir(dirname)
+                if filename.startswith(file_head)
+            ]
             # collect all data from dirname
-            cols, _ = clique.assemble(list(os.listdir(dirname)))
+            cols, _ = clique.assemble(files_from_dir)
             if not cols:
                 raise CreatorError(
                     f"No collections found in directory '{dirname}'."
@@ -737,6 +845,24 @@ configuration in project settings.
                 explicit_output_name
             )
 
+    def _get_task_type_from_task_name(self, task_name: str):
+        """ Retrieve task type from task name.
+
+        Args:
+            task_name (str): The task name.
+
+        Returns:
+            str. The task type computed from settings.
+        """
+        for task_setting in self.folder_creation_config["task_type_regexes"]:
+            if re.match(task_setting["regex"], task_name):
+                task_type = task_setting["task_type"]
+                break
+        else:
+            task_type = self.folder_creation_config["task_create_type"]
+
+        return task_type
+
     def _create_instances_from_csv_data(self, csv_dir: str, filename: str):
         """Create instances from csv data"""
         # from special function get all data from csv file and convert them
@@ -758,7 +884,11 @@ configuration in project settings.
                 product_item.product_type,
                 product_item.variant
             )
-            label: str = f"{folder_path}_{product_name}_v{version:>03}"
+
+            if version is not None:
+                label: str = f"{folder_path}_{product_name}_v{version:>03}"
+            else:
+                label: str = f"{folder_path}_{product_name}_v[next]"
 
             repre_items: List[RepreItem] = product_item.repre_items
             first_repre_item: RepreItem = repre_items[0]
@@ -770,9 +900,16 @@ configuration in project settings.
                 ),
                 None
             )
+
             slate_exists: bool = any(
                 repre_item.slate_exists
                 for repre_item in repre_items
+            )
+
+            is_reviewable: bool = any(
+                True
+                for repre_item in repre_items
+                if "review" in repre_item.tags
             )
 
             families: List[str] = ["csv_ingest"]
@@ -780,6 +917,10 @@ configuration in project settings.
                 # adding slate to families mainly for loaders to be able
                 # to filter out slates
                 families.append("slate")
+
+            if is_reviewable:
+                # review family needs to be added for ExtractReview plugin
+                families.append("review")
 
             instance_data = {
                 "name": product_item.instance_name,
@@ -799,6 +940,31 @@ configuration in project settings.
                 "prepared_data_for_repres": []
             }
 
+            if product_item.has_promised_context:
+                hierarchy, folder_name = folder_path.rsplit("/", 1)
+                families.append("shot")
+                instance_data.update(
+                    {
+                        "newHierarchyIntegration": True,
+                        "hierarchy": hierarchy,
+                        "parents": product_item.parents,
+                        "families": families,
+                        "heroTrack": True,
+                    }
+                )
+
+                folder_type = self._get_folder_type_from_regex_settings(folder_name)
+                instance_data["folder_type"] = folder_type
+
+                if product_item.task_name:
+                    task_type = self._get_task_type_from_task_name(
+                        product_item.task_name
+                    )
+                    tasks = instance_data.setdefault("tasks", {})
+                    tasks[product_item.task_name] = {
+                        "type": task_type
+                    }
+
             # create new instance
             new_instance: CreatedInstance = CreatedInstance(
                 product_item.product_type,
@@ -807,6 +973,10 @@ configuration in project settings.
                 self
             )
             self._prepare_representations(product_item, new_instance)
+
+            if product_item.has_promised_context:
+                new_instance.transient_data["has_promised_context"] = True
+
             instances.append(new_instance)
 
         return instances

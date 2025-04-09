@@ -24,7 +24,7 @@ class ValidateFrameRange(OptionalPyblishPluginMixin,
     # published data might be sequence (.mov, .mp4) in that counting files
     # doesn't make sense
     check_extensions = ["exr", "dpx", "jpg", "jpeg", "png", "tiff", "tga",
-                        "gif", "svg"]
+                        "gif", "svg", "sxr"]
     skip_timelines_check = []  # skip for specific task names (regex)
 
     def process(self, instance):
@@ -47,11 +47,15 @@ class ValidateFrameRange(OptionalPyblishPluginMixin,
                 for pattern in self.skip_timelines_check)):
             self.log.info("Skipping for {} task".format(instance.data["task"]))
 
-        folder_attributes = instance.data["folderEntity"]["attrib"]
-        frame_start = folder_attributes["frameStart"]
-        frame_end = folder_attributes["frameEnd"]
-        handle_start = folder_attributes["handleStart"]
-        handle_end = folder_attributes["handleEnd"]
+        # Use attributes from task entity if set, otherwise from folder entity
+        entity = (
+            instance.data.get("taskEntity") or instance.data["folderEntity"]
+        )
+        attributes = entity["attrib"]
+        frame_start = attributes["frameStart"]
+        frame_end = attributes["frameEnd"]
+        handle_start = attributes["handleStart"]
+        handle_end = attributes["handleEnd"]
         duration = (frame_end - frame_start + 1) + handle_start + handle_end
 
         repres = instance.data.get("representations")
@@ -73,7 +77,7 @@ class ValidateFrameRange(OptionalPyblishPluginMixin,
 
         msg = (
             "Frame duration from DB:'{}' doesn't match number of files:'{}'"
-            " Please change frame range for Folder or limit no. of files"
+            " Please change frame range for folder/task or limit no. of files"
         ). format(int(duration), frames)
 
         formatting_data = {"duration": duration,

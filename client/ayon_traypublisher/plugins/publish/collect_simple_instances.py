@@ -5,6 +5,9 @@ from pathlib import Path
 import clique
 import pyblish.api
 
+from ayon_core.lib import transcoding
+from ayon_core.pipeline import PublishError
+
 
 class CollectSettingsSimpleInstances(pyblish.api.InstancePlugin):
     """Collect data for instances created by settings creators.
@@ -83,6 +86,20 @@ class CollectSettingsSimpleInstances(pyblish.api.InstancePlugin):
             # - we should maybe not fill the key when sequence is used?
             origin_basename = Path(source_filepaths[0]).stem
             instance.data["originalBasename"] = origin_basename
+
+        # Special test for SXR format.
+        # The following code can be removed as soon as a new
+        # ayon-core dependency is set on ayon-traypublisher.
+        # https://github.com/ynput/ayon-traypublisher/issues/77
+        for repre in instance.data["representations"]:
+            if (
+                repre["ext"].lower() == "sxr"
+                and ".sxr" not in transcoding.IMAGE_EXTENSIONS
+            ):
+                raise PublishError(
+                    "SXR extension is not supported. Update"
+                    " ayon-core in order to fix this."
+                )
 
         self.log.debug(
             (
@@ -191,6 +208,7 @@ class CollectSettingsSimpleInstances(pyblish.api.InstancePlugin):
         source_filepaths.extend(filepaths)
         # First try to find out representation with same filepaths
         #   so it's not needed to create new representation just for review
+        use_source_as_review = False
         review_representation = None
         # Review path (only for logging)
         review_path = None
@@ -199,6 +217,7 @@ class CollectSettingsSimpleInstances(pyblish.api.InstancePlugin):
             if _filepaths == filepaths:
                 review_representation = representation
                 review_path = repre_path
+                use_source_as_review = True
                 break
 
         if review_representation is None:
@@ -219,7 +238,8 @@ class CollectSettingsSimpleInstances(pyblish.api.InstancePlugin):
 
         # Adding "review" to representation name since it can clash with main
         # representation if they share the same extension.
-        review_representation["outputName"] = "review"
+        if not use_source_as_review:
+            review_representation["outputName"] = "review"
 
         self.log.debug("Representation {} was marked for review. {}".format(
             review_representation["name"], review_path
@@ -250,18 +270,24 @@ class CollectSettingsSimpleInstances(pyblish.api.InstancePlugin):
         repre_name = repre_ext = ext[1:]
         if repre_name not in repre_names_counter:
             repre_names_counter[repre_name] = 2
+            counter = None
         else:
             counter = repre_names_counter[repre_name]
             repre_names_counter[repre_name] += 1
             repre_name = "{}_{}".format(repre_name, counter)
         repre_names.append(repre_name)
-        return {
+        representation_data = {
             "ext": repre_ext,
             "name": repre_name,
             "stagingDir": filepath_item["directory"],
             "files": filenames,
             "tags": []
         }
+
+        if counter:
+            representation_data["outputName"] = str(counter)
+
+        return representation_data
 
     def _calculate_source(self, filepaths):
         cols, rems = clique.assemble(filepaths)

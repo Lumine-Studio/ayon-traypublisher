@@ -35,25 +35,55 @@ CLIP_ATTR_DEFS = [
             {"value": 24, "label": "24"},
             {"value": 25, "label": "25"},
             {"value": 29.97, "label": "29.97"},
-            {"value": 30, "label": "30"}
+            {"value": 30, "label": "30"},
         ],
-        label="FPS"
+        label="FPS",
     ),
+    NumberDef("workfile_start_frame", default=1001, label="Workfile start frame"),
+    NumberDef("handle_start", default=0, label="Handle start"),
+    NumberDef("handle_end", default=0, label="Handle end"),
     NumberDef(
-        "workfile_start_frame",
-        default=1001,
-        label="Workfile start frame"
-    ),
-    NumberDef(
-        "handle_start",
+        "frameStart",
         default=0,
-        label="Handle start"
+        label="Frame start",
+        disabled=True,
     ),
     NumberDef(
-        "handle_end",
+        "frameEnd",
         default=0,
-        label="Handle end"
-    )
+        label="Frame end",
+        disabled=True,
+    ),
+    NumberDef(
+        "clipIn",
+        default=0,
+        label="Clip in",
+        disabled=True,
+    ),
+    NumberDef(
+        "clipOut",
+        default=0,
+        label="Clip out",
+        disabled=True,
+    ),
+    NumberDef(
+        "clipDuration",
+        default=0,
+        label="Clip duration",
+        disabled=True,
+    ),
+    NumberDef(
+        "sourceIn",
+        default=0,
+        label="Media source in",
+        disabled=True,
+    ),
+    NumberDef(
+        "sourceOut",
+        default=0,
+        label="Media source out",
+        disabled=True,
+    ),
 ]
 
 
@@ -79,7 +109,12 @@ class EditorialClipInstanceCreatorBase(HiddenTrayPublishCreator):
                 "add_review_family",
                 default=True,
                 label="Review"
-            )
+            ),
+            TextDef(
+                "parent_instance",
+                label="Linked to",
+                disabled=True
+            ),
         ]
 
 
@@ -96,7 +131,8 @@ class EditorialShotInstanceCreator(EditorialClipInstanceCreatorBase):
         instance_attributes = [
             TextDef(
                 "folderPath",
-                label="Folder path"
+                label="Folder path",
+                disabled=True,
             )
         ]
         instance_attributes.extend(CLIP_ATTR_DEFS)
@@ -143,7 +179,7 @@ class EditorialSimpleCreator(TrayPublishCreator):
     Args:
         TrayPublishCreator (Creator): Tray publisher plugin class
     """
-
+    enabled = True
     label = "Editorial Simple"
     product_type = "editorial"
     identifier = "editorial_simple"
@@ -167,6 +203,8 @@ or updating already created. Publishing will create OTIO file.
             project_settings["traypublisher"]["editorial_creators"]
         )
         creator_settings = editorial_creators.get(self.identifier)
+
+        self.enabled = creator_settings["enabled"]
 
         self._shot_metadata_solver.update_data(
             creator_settings["clip_name_tokenizer"],
@@ -249,7 +287,6 @@ or updating already created. Publishing will create OTIO file.
             product_name,
             instance_data,
             seq_path,
-            media_path,
             first_otio_timeline
         )
 
@@ -258,7 +295,6 @@ or updating already created. Publishing will create OTIO file.
         product_name,
         data,
         sequence_path,
-        media_path,
         otio_timeline
     ):
         """Otio instance creating function
@@ -267,13 +303,11 @@ or updating already created. Publishing will create OTIO file.
             product_name (str): Product name.
             data (dict): instance data
             sequence_path (str): path to sequence file
-            media_path (str): path to media file
             otio_timeline (otio.Timeline): otio timeline object
         """
         # Pass precreate data to creator attributes
         data.update({
             "sequenceFilePath": sequence_path,
-            "editorialSourcePath": media_path,
             "otioTimeline": otio.adapters.write_to_string(otio_timeline)
         })
         new_instance = CreatedInstance(
@@ -318,7 +352,6 @@ or updating already created. Publishing will create OTIO file.
         """
         return_path_list = []
 
-
         if isinstance(file_path_data, list):
             return_path_list = [
                 os.path.join(f["directory"], f["filenames"][0])
@@ -351,11 +384,7 @@ or updating already created. Publishing will create OTIO file.
             product_type_presets (list): list of dict settings product presets
         """
 
-        tracks = [
-            track for track in otio_timeline.each_child(
-                descended_from_type=otio.schema.Track)
-            if track.kind == "Video"
-        ]
+        tracks = otio_timeline.video_tracks()
 
         # media data for audio stream and reference solving
         media_data = self._get_media_source_metadata(media_path)
@@ -372,7 +401,7 @@ or updating already created. Publishing will create OTIO file.
             except AttributeError:
                 track_start_frame = 0
 
-            for otio_clip in track.each_child():
+            for otio_clip in track.find_clips():
                 if not self._validate_clip_for_processing(otio_clip):
                     continue
 
@@ -388,6 +417,9 @@ or updating already created. Publishing will create OTIO file.
                     track_start_frame,
                     folder_entity
                 )
+
+                # passing for trimming
+                base_instance_data["editorialSourcePath"] = media_path
 
                 parenting_data = {
                     "instance_label": None,
@@ -812,7 +844,12 @@ or updating already created. Publishing will create OTIO file.
                 ],
                 allow_sequences=False,
                 single_item=False,
-                label="Sequence file",
+                label="Edit Decision List",
+                tooltip=(
+                    "An Edit Decision List (EDL) is a list of edits that includes reel and timecode data.\n"
+                    "This information shows where each video clip can be found to create the final cut.\n"
+                    "EDL files can be generated using apps like Nuke Studio and Resolve."
+                )
             ),
             FileDef(
                 "media_filepaths_data",
@@ -833,7 +870,7 @@ or updating already created. Publishing will create OTIO file.
                 label="Timeline offset"
             ),
             UISeparatorDef(),
-            UILabelDef("Clip instance attributes"),
+            UILabelDef("Add products for each discovered shot"),
             UISeparatorDef()
         ]
         # add variants swithers
